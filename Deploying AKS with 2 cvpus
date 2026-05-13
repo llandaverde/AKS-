@@ -1,0 +1,29 @@
+Standard_D2ps_v5 is Available in Central India — 2 vCPUs! 🎯
+Standard_D2ps_v5 has 2 vCPUs and shows None (no restrictions) in Central India. This fits perfectly within your 4 vCPU quota!
+
+Deploy Now:
+bashexport RAND=$RANDOM
+export RG_NAME="myresourcegroup${RAND}"
+
+az group create --name $RG_NAME --location centralindia
+
+python3 -c "
+import json
+with open('main.json', 'r') as f:
+    template = json.load(f)
+for resource in template['resources']:
+    if resource['type'] == 'Microsoft.ContainerService/managedClusters':
+        resource['properties']['agentPoolProfiles'][0]['count'] = 1
+        resource['properties']['agentPoolProfiles'][0]['vmSize'] = 'Standard_D2ps_v5'
+        resource['sku'] = {'name': 'Base', 'tier': 'Free'}
+with open('main_small.json', 'w') as f:
+    json.dump(template, f, indent=2)
+print('Done! Using Standard_D2ps_v5 - 2 vCPUs')
+"
+
+az deployment group create \
+  --resource-group $RG_NAME \
+  --name "${RG_NAME}-deployment" \
+  --template-file main_small.json \
+  --parameters randomSeed=$RAND \
+  userObjectId=$(az ad signed-in-user show --query id -o tsv)
