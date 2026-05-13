@@ -27,3 +27,13 @@ az deployment group create \
   --template-file main_small.json \
   --parameters randomSeed=$RAND \
   userObjectId=$(az ad signed-in-user show --query id -o tsv)
+
+
+# Get the AKS cluster name
+AKS_NAME=$(az aks list --resource-group $RG_NAME --query "[0].name" -o tsv)
+
+# Download credentials
+az aks get-credentials --resource-group $RG_NAME --name $AKS_NAME
+
+# Verify connection
+kubectl get nodes
