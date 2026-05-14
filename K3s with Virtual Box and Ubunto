@@ -1,0 +1,145 @@
+1. VirtualBox Network Setup
+Problem: VMs were using NAT Network (itlui) which required port forwarding to allow external SSH access.
+Port Forwarding Rules Created:
+NameHost PortGuest IPGuest PortSSH222210.0.2.1522SSH2222310.0.2.1422SSH3222410.0.2.1422
+Windows Firewall Rules Added:
+powershellNew-NetFirewallRule -DisplayName "VirtualBox SSH" -Direction Inbound -Protocol TCP -LocalPort 2222 -Action Allow -Profile Any
+New-NetFirewallRule -DisplayName "VirtualBox SSH2" -Direction Inbound -Protocol TCP -LocalPort 2223 -Action Allow -Profile Any
+New-NetFirewallRule -DisplayName "VirtualBox SSH3" -Direction Inbound -Protocol TCP -LocalPort 2224 -Action Allow -Profile Any
+Fixed Windows Network Profile (was blocking external connections):
+powershellSet-NetConnectionProfile -Name "CommunityFibre10Gb_F8729 2" -NetworkCategory Private
+
+2. Ubuntu VMs Configuration
+VM1 (lui-VB) — k3s Server:
+
+IP: 10.0.2.15
+Username: lui
+SSH Port: 2222
+
+VM2 (lui-VB2) — k3s Agent (clone of VM1):
+
+IP: 10.0.2.14
+Username: lui
+SSH Port: 2224
+Had different MAC address ✅ (not the cause of issues)
+Had different default gateway (10.0.2.2 vs 10.0.2.1)
+
+SSH installed and enabled on both VMs:
+bashsudo apt install openssh-server -y
+sudo systemctl start ssh
+sudo systemctl enable ssh
+Fixed hostname resolution on VM2:
+bashecho "127.0.1.1 lui-VB2" | sudo tee -a /etc/hosts
+Mac SSH shortcuts added (~/.ssh/config):
+Host vm1
+    HostName 192.168.1.111
+    Port 2222
+    User lui
+
+Host vm2
+    HostName 192.168.1.111
+    Port 2224
+    User lui
+
+3. k3s Kubernetes Installation
+VM1 — k3s Server:
+bashcurl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="v1.35.4+k3s1" sh -
+Get node token (needed for agent):
+bashsudo cat /var/lib/rancher/k3s/server/node-token
+VM2 — k3s Agent:
+bash# Install curl first
+sudo apt install curl -y
+
+# Install k3s agent matching server version
+curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="v1.35.4+k3s1" \
+K3S_URL="https://10.0.2.15:6443" \
+K3S_TOKEN="<token from VM1>" \
+sh -
+Verify both nodes joined:
+bashsudo k3s kubectl get nodes
+NAME      STATUS   ROLES                  AGE
+lui-vb    Ready    control-plane,master
+lui-vb2   Ready    <none>
+
+4. Kubernetes Dashboard Setup
+Install dashboard on VM1:
+bashsudo kubectl apply -f https://raw.githubusercontent.com/kubernetes/dashboard/v2.7.0/aio/deploy/recommended.yaml
+Create admin user:
+bashcat <<EOF | sudo kubectl apply -f -
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: admin-user
+  namespace: kubernetes-dashboard
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: admin-user
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+- kind: ServiceAccount
+  name: admin-user
+  namespace: kubernetes-dashboard
+EOF
+Generate login token:
+bashsudo kubectl -n kubernetes-dashboard create token admin-user
+Copy kubeconfig to Mac:
+bash# On VM1 first
+sudo cp /etc/rancher/k3s/k3s.yaml ~/k3s.yaml
+sudo chown lui:lui ~/k3s.yaml
+
+# On Mac
+mkdir -p ~/.kube
+scp -P 2222 lui@192.168.1.111:~/k3s.yaml ~/.kube/config
+sed -i '' 's/127.0.0.1/192.168.1.111/g' ~/.kube/config
+kubectl config set-cluster default --insecure-skip-tls-verify=true
+Add VirtualBox port forwarding for API:
+NameHost PortGuest IPGuest Portk3s-api644310.0.2.156443
+Run kubectl proxy on Mac:
+bashkubectl proxy
+Access dashboard:
+http://localhost:8001/api/v1/namespaces/kubernetes-dashboard/services/https:kubernetes-dashboard:/proxy/
+
+5. nginx Deployment
+bash# Deploy nginx
+sudo kubectl create deployment nginx --image=nginx --replicas=1
+
+# Expose as NodePort
+sudo kubectl expose deployment nginx --port=80 --type=NodePort
+
+# Check the assigned port
+sudo kubectl get svc nginx
+# Result: 80:30737/TCP
+
+# Add VirtualBox port forwarding
+# Host Port: 30737 → Guest IP: 10.0.2.15 → Guest Port: 30737
+
+# Add Windows firewall rule
+New-NetFirewallRule -DisplayName "k3s nginx" -Direction Inbound -Protocol TCP -LocalPort 30737 -Action Allow -Profile Any
+
+# Access from Mac browser
+http://192.168.1.111:30737
+
+6. Key Issues We Solved
+ProblemRoot CauseFixSSH connection refusedPort forwarding Guest IP was 10.0.2.0 (wrong)Changed to 10.0.2.15Mac couldn't SSH to VM2Windows network profile was PublicChanged to PrivateVM2 SSH working from Windows but not MacVirtualBox NAT routing issue with cloned VMsUsed different port (2224)k3s agent connecting to wrong addressUsed 127.0.0.1:6444 instead of 10.0.2.15:6443Reinstalled with K3S_URL variableDifferent k3s versionsVM2 installed older versionReinstalled agent with matching versionkubectl proxy TLS errorCertificate not valid for 192.168.1.111Used --insecure-skip-tls-verify=truelui-vb user not foundUsername was lui not lui-vbUsed correct username
+
+7. Final Architecture
+Mac (192.168.1.42)
+    │
+    │ SSH port 2222 / 2224
+    │ kubectl proxy :8001
+    │
+Windows Host (192.168.1.111)
+    │
+    │ VirtualBox NAT Network (itlui) 10.0.2.0/24
+    │
+    ├── VM1 lui-VB (10.0.2.15) — k3s Server
+    │       └── nginx pod :30737
+    │       └── Kubernetes Dashboard
+    │
+    └── VM2 lui-VB2 (10.0.2.14) — k3s Agent
+            └── Worker node
